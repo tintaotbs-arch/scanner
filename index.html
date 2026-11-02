@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Quét tem MMTB</title>
 <style>
-  :root { --bg:#f4f6f9; --fg:#0f172a; --muted:#475569; --accent:#16a34a; --warn:#d97706; --err:#dc2626;
+  :root { --bg:#f4f6f9; --fg:#0f172a; --muted:#475569; --accent:#15803d; --warn:#d97706; --err:#dc2626;
     --btn:#e2e8f0; --btn-fg:#0f172a; --line:#cbd5e1; }
   * { box-sizing: border-box; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
@@ -20,6 +20,11 @@
   #guide.hit { border-color:#22c55e; }
   #hint { position:absolute; left:0; right:0; top:calc(27.5% - 34px); text-align:center;
     font-size:14px; color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.7); pointer-events:none; }
+  /* Thông báo kết quả quét liên tục: to, đổi màu theo kết quả (xanh = thêm mới, cam = đã quét rồi, đỏ = lỗi) */
+  #banner { position:absolute; left:5%; right:5%; bottom:5%; padding:14px 12px; border-radius:12px; text-align:center;
+    color:#fff; display:none; z-index:4; box-shadow:0 4px 14px rgba(0,0,0,.35); }
+  #banner b { display:block; font-size:20px; word-break:break-all; } #banner span { display:block; font-size:14px; margin-top:2px; }
+  #banner.ok { background:#15803d; } #banner.dup { background:#b45309; } #banner.err { background:#b91c1c; } #banner.wait { background:#334155; }
   #bar { padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:#fff; border-top:1px solid var(--line); }
   #status { min-height:22px; font-size:14px; color:var(--muted); text-align:center; margin-bottom:10px; }
   #status.ok { color:var(--accent); font-weight:600; } #status.err { color:var(--err); }
@@ -47,6 +52,7 @@
     <video id="video" playsinline muted autoplay></video>
     <div id="guide"></div>
     <div id="hint">Đưa vạch của tem vào khung</div>
+    <div id="banner"></div>
 
     <div id="start">
       <h2 style="margin:0">Quét tem MMTB</h2>
@@ -262,20 +268,46 @@
 
   // ---- Trả mã về ứng dụng ----
   // Quét liên tục: cùng một mã còn trong khung thì không gửi lại; vắng mặt quá 4 giây mới tính là quét lần nữa
+  const results = {};   // kết quả app trả về theo mã, để báo lại khi quét trùng
+  let added = 0, bannerTimer = null;
+  function showBanner(cls, big, small, ms) {
+    const b = $('banner');
+    b.className = cls; b.textContent = '';
+    const t = document.createElement('b'); t.textContent = big; b.appendChild(t);
+    if (small) { const s = document.createElement('span'); s.textContent = small; b.appendChild(s); }
+    b.style.display = 'block';
+    clearTimeout(bannerTimer); bannerTimer = setTimeout(() => { b.style.display = 'none'; }, ms || 1800);
+    // Rung: 1 lần = thêm mới, 2 lần = trùng hoặc lỗi
+    if (navigator.vibrate) navigator.vibrate(cls === 'ok' ? 80 : [80, 60, 80]);
+  }
+  function showResult(text, r) {
+    if (r.ok) showBanner('ok', '✓ Đã thêm', text + (r.msg ? ' · ' + r.msg : ''));
+    else if (r.dup) showBanner('dup', 'Máy này đã quét rồi', text);
+    else showBanner('err', '✗ Không thêm được', text + ' · ' + r.msg, 3000);
+    setStatus('Đã thêm ' + added + ' máy', 'ok');
+  }
   function onFoundCont(text) {
-    const now = Date.now(), fresh = !(sentAt[text] && now - sentAt[text] < 4000);
+    const now = Date.now(), seen = sentAt[text];
     sentAt[text] = now;
-    if (!fresh) return;
+    if (seen && now - seen < 4000) {
+      // Mã vẫn trong khung / vừa quét: không gửi lại, nhưng báo ngay thay vì im lặng
+      const r = results[text];
+      if (r) showResult(text, r.ok ? { dup: true } : r);
+      return;
+    }
     guide.classList.add('hit'); setTimeout(() => guide.classList.remove('hit'), 600);
-    if (navigator.vibrate) navigator.vibrate(60);
-    try { toApp().postMessage({ type: 'mmtb-scan', code: text, rid: RID }, APP_ORIGIN); setStatus('Đã gửi: ' + text, 'ok'); }
-    catch (e) { setStatus('Không gửi được mã về ứng dụng', 'err'); }
+    try { toApp().postMessage({ type: 'mmtb-scan', code: text, rid: RID }, APP_ORIGIN); showBanner('wait', 'Đang kiểm tra...', text, 4000); }
+    catch (e) { showBanner('err', 'Không gửi được mã về ứng dụng', text, 3000); }
   }
   // App báo kết quả từng mã (ack) hoặc báo đã đóng hàng đợi (stop)
   window.addEventListener('message', e => {
     const d = e.data;
     if (!d || d.rid !== RID || e.source !== toApp()) return;
-    if (d.type === 'mmtb-scan-ack') setStatus((d.ok ? '✓ ' : '✗ ') + d.msg, d.ok ? 'ok' : 'err');
+    if (d.type === 'mmtb-scan-ack') {
+      results[d.code] = { ok: !!d.ok, dup: !!d.dup, msg: d.msg || '' };
+      if (d.ok) added++;
+      showResult(d.code, results[d.code]);
+    }
     else if (d.type === 'mmtb-scan-stop') { stopCamera(); try { window.close(); } catch (_) {} setStatus('Đã dừng. Có thể đóng tab này.'); }
   });
 

@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quét tem MMTB</title>
+<style>
+  :root { --bg:#f4f6f9; --fg:#0f172a; --muted:#475569; --accent:#16a34a; --warn:#d97706; --err:#dc2626;
+    --btn:#e2e8f0; --btn-fg:#0f172a; --line:#cbd5e1; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  #app { position:fixed; inset:0; display:flex; flex-direction:column; }
+  #stage { position:relative; flex:1; min-height:0; background:#e2e8f0; overflow:hidden; }
+  video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  /* Khung ngắm: dải giữa, đúng vùng được đọc (45% chiều cao) */
+  #guide { position:absolute; left:4%; right:4%; top:27.5%; height:45%;
+    border:2px solid rgba(255,255,255,.85); border-radius:10px;
+    box-shadow:0 0 0 100vmax rgba(15,23,42,.35); pointer-events:none; }
+  #guide.hit { border-color:#22c55e; }
+  #hint { position:absolute; left:0; right:0; top:calc(27.5% - 34px); text-align:center;
+    font-size:14px; color:#fff; text-shadow:0 1px 3px rgba(0,0,0,.7); pointer-events:none; }
+  #bar { padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:#fff; border-top:1px solid var(--line); }
+  #status { min-height:22px; font-size:14px; color:var(--muted); text-align:center; margin-bottom:10px; }
+  #status.ok { color:var(--accent); font-weight:600; } #status.err { color:var(--err); }
+  .row { display:flex; gap:8px; }
+  button { flex:1; font:inherit; font-size:15px; padding:12px; border-radius:10px; border:1px solid var(--line);
+    background:var(--btn); color:var(--btn-fg); }
+  button:active { filter:brightness(.94); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:700; }
+  button[hidden] { display:none; }
+  #start { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:14px; padding:24px; text-align:center; background:var(--bg); z-index:5; }
+  #start p { margin:0; color:var(--muted); max-width:320px; line-height:1.45; }
+  #start button { flex:none; width:100%; max-width:320px; }
+  #done { position:absolute; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center;
+    gap:12px; padding:24px; text-align:center; background:var(--bg); z-index:6; }
+  #done.show { display:flex; }
+  #doneCode { font-size:28px; font-weight:800; letter-spacing:1px; word-break:break-all; }
+  #done p { margin:0; color:var(--muted); max-width:320px; line-height:1.45; white-space:pre-line; }
+  #done button { flex:none; width:100%; max-width:320px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="guide"></div>
+    <div id="hint">Đưa vạch của tem vào khung</div>
+
+    <div id="start">
+      <h2 style="margin:0">Quét tem MMTB</h2>
+      <p>Bấm nút bên dưới để bật camera, rồi đưa vạch trên tem vào khung. Giữ máy cách tem khoảng 15–25 cm.</p>
+      <button class="primary" id="startBtn">Bật camera</button>
+      <button id="photoBtn">Chụp ảnh tem</button>
+      <button id="cancelBtn">Hủy</button>
+    </div>
+
+    <div id="done">
+      <div style="font-size:14px;color:var(--muted)">Đã đọc được</div>
+      <div id="doneCode"></div>
+      <p id="doneMsg"></p>
+      <button class="primary" id="copyBtn">Sao chép mã</button>
+      <button id="againBtn">Quét lại</button>
+      <button id="closeBtn">Đóng trang này</button>
+    </div>
+  </div>
+  <div id="bar">
+    <div id="status">Chưa bật camera</div>
+    <div class="row">
+      <button id="torchBtn" hidden>Đèn flash</button>
+      <button id="zoomBtn" hidden>Zoom 2x</button>
+      <button id="photoBtn2">Chụp ảnh</button>
+      <button id="stopBtn">Đóng</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="photoInput" accept="image/*" capture="environment" hidden>
+<script src="code128.js"></script>
+<script>
+(() => {
+  'use strict';
+
+  // ---- Tham số từ ứng dụng: ?o=<origin của app>&rid=<mã yêu cầu> ----
+  // targetOrigin = origin app gửi lên → trình duyệt chỉ giao tin cho đúng trang đó.
+  const qs = new URLSearchParams(location.search);
+  const APP_ORIGIN = qs.get('o') || '';
+  const RID = qs.get('rid') || '';
+
+  const SCAN_INTERVAL_MS = 150;
+  const STRIP_RATIO = 0.45;          // chỉ đọc dải giữa khung hình
+  const ZOOM_TARGET = 2;
+  // Code128 và QR có checksum/sửa lỗi nên nhận ngay; định dạng khác cần 2 lần đọc giống nhau liên tiếp.
+  const TRUSTED = new Set(['code_128', 'qr_code']);
+
+  const $ = id => document.getElementById(id);
+  const video = $('video'), statusEl = $('status'), guide = $('guide');
+  let stream = null, track = null, running = false, busy = false, timer = null;
+  let detector = null, zx = null, zxLoading = null, frameNo = 0;
+  let lastText = '', lastCount = 0, torchOn = false, zoomed = false;
+  const JS = window.MMTBCode128 || null;   // code128.js: bộ đọc Code128 cho máy không có BarcodeDetector
+
+  // Nhận mã về: cửa sổ mở trang này (tab mới) hoặc trang chứa iframe (modal trong app)
+  const toApp = () => window.opener && !window.opener.closed ? window.opener : (window.parent !== window ? window.parent : null);
+
+  const setStatus = (t, cls) => { statusEl.textContent = t; statusEl.className = cls || ''; };
+
+  // ---- Engine: BarcodeDetector (Android); iPhone dùng code128.js, zxing-wasm tải ngầm làm dự phòng ----
+  async function initEngine() {
+    if (detector || zx) return;
+    if ('BarcodeDetector' in window) {
+      try {
+        const want = ['code_128', 'code_39', 'qr_code'];
+        const sup = await BarcodeDetector.getSupportedFormats();
+        const formats = want.filter(f => sup.includes(f));
+        if (formats.length) { detector = new BarcodeDetector({ formats }); return; }
+      } catch (e) { console.warn('BarcodeDetector lỗi, chuyển sang zxing-wasm', e); }
+    }
+    if (JS) { loadZxing(); return; }
+    setStatus('Đang tải bộ đọc vạch...');
+    await loadZxing();
+    if (!zx) throw new Error('Không tải được bộ đọc vạch (kiểm tra mạng)');
+  }
+
+  // Tải zxing-wasm một lần; lỗi thì thôi (code128.js vẫn chạy).
+  function loadZxing() {
+    if (zx || zxLoading) return zxLoading || Promise.resolve();
+    zxLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.0/dist/iife/reader/index.js';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Không tải được bộ đọc vạch (kiểm tra mạng)'));
+      document.head.appendChild(s);
+    }).then(() => { if (typeof ZXingWASM !== 'undefined') zx = ZXingWASM; })
+      .catch(e => console.warn('zxing-wasm không tải được', e));
+    return zxLoading;
+  }
+
+  const engineName = () => detector ? 'Android' : JS ? 'JS' + (zx ? '+zxing' : '') : 'zxing';
+
+  const ZX_OPTS = { tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true,
+    maxNumberOfSymbols: 1, formats: ['Code128', 'Code39', 'QRCode'] };
+  const ZX_NAME = { Code128: 'code_128', Code39: 'code_39', QRCode: 'qr_code' };
+
+  const cv = document.createElement('canvas');
+  const cx = cv.getContext('2d', { willReadFrequently: true });
+
+  // Trả về { text, format } hoặc null
+  async function decodeFrame() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    const sh = Math.round(vh * STRIP_RATIO), sy = Math.round((vh - sh) / 2);
+    cv.width = vw; cv.height = sh;
+    cx.drawImage(video, 0, sy, vw, sh, 0, 0, vw, sh);
+    if (detector) {
+      const r = await detector.detect(cv);
+      return r.length ? { text: r[0].rawValue, format: r[0].format } : null;
+    }
+    return decodeImage(cx.getImageData(0, 0, vw, sh), 16, ++frameNo % 3 === 0);
+  }
+
+  // code128.js trước; nhiều đường quét cùng ra một mã thì tin ngay, chỉ một đường thì chờ khung sau xác nhận.
+  // zxing (nếu đã tải) chạy thêm khi useZx — để đọc QR/Code39 hoặc khi code128.js bó tay.
+  async function decodeImage(img, lines, useZx, vertical) {
+    if (JS) {
+      const r = JS.decode(img, { lines, minAgree: 2 }) || (vertical ? JS.decode(img, { lines, minAgree: 2, vertical: true }) : null);
+      if (r) return { text: r.text, format: r.count >= 2 ? 'code_128' : 'code_128_1' };
+    }
+    if (zx && (useZx || !JS)) {
+      const r = await zx.readBarcodes(img, ZX_OPTS);
+      if (r.length && r[0].text) return { text: r[0].text, format: ZX_NAME[r[0].format] || r[0].format };
+    }
+    return null;
+  }
+
+  // Làm sạch mã: bỏ ký tự điều khiển và tiền tố nhận dạng loại vạch của AIM (ví dụ "]C1" của Code128).
+  const cleanCode = t => String(t).replace(/[\u0000-\u001f\u007f]/g, '').trim().replace(/^\][A-Za-z][0-9A-Za-z]/, '').trim();
+
+  async function tick() {
+    if (!running || busy) return;
+    busy = true;
+    try {
+      const hit = await decodeFrame();
+      if (hit && hit.text) {
+        const text = cleanCode(hit.text);
+        if (text) {
+          lastCount = (text === lastText) ? lastCount + 1 : 1;
+          lastText = text;
+          if (TRUSTED.has(hit.format) || lastCount >= 2) { onFound(text); return; }
+        }
+      }
+    } catch (e) { console.warn('decode lỗi', e); }
+    finally { busy = false; }
+  }
+
+  // ---- Camera ----
+  async function startCamera() {
+    setStatus('Đang bật camera...');
+    // Phải gọi getUserMedia ngay trong lúc xử lý thao tác bấm nút (yêu cầu của iOS).
+    const media = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+      ? navigator.mediaDevices.getUserMedia({ audio: false, video: {
+          facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } })
+      : Promise.reject(new Error('Trình duyệt không hỗ trợ camera'));
+    try {
+      stream = await media;
+    } catch (e) {
+      const m = e && e.name === 'NotAllowedError'
+        ? 'Chưa được cấp quyền camera. Hãy cho phép camera cho trang này rồi bấm lại.'
+        : 'Không bật được camera: ' + (e && e.message || e);
+      setStatus(m, 'err'); $('start').style.display = 'flex';
+      // Trong iframe mà camera bị chặn → báo app để nó mở tab mới thay thế
+      if (window.parent !== window && APP_ORIGIN) window.parent.postMessage({ type: 'mmtb-scan-error', error: String(e && e.name || e), rid: RID }, APP_ORIGIN);
+      return;
+    }
+    track = stream.getVideoTracks()[0];
+    video.srcObject = stream;
+    try { await video.play(); } catch (_) {}
+    $('start').style.display = 'none';
+
+    // Lấy nét liên tục / zoom / đèn: tùy thiết bị, thiếu thì bỏ qua.
+    let caps = {};
+    try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch (_) {}
+    try { if (caps.focusMode && caps.focusMode.includes('continuous'))
+      await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (_) {}
+    $('torchBtn').hidden = !caps.torch;
+    $('zoomBtn').hidden = !(caps.zoom && caps.zoom.max > 1);
+    if (!$('zoomBtn').hidden) await setZoom(true);
+
+    try { await initEngine(); }
+    catch (e) { setStatus(e.message, 'err'); stopCamera(); $('start').style.display = 'flex'; return; }
+
+    lastText = ''; lastCount = 0; running = true;
+    guide.classList.remove('hit');
+    setStatus('Đang quét... (' + engineName() + ')');
+    timer = setInterval(tick, SCAN_INTERVAL_MS);
+  }
+
+  async function setZoom(on) {
+    if (!track) return;
+    try {
+      const z = track.getCapabilities().zoom;
+      const val = on ? Math.min(ZOOM_TARGET, z.max) : z.min;
+      await track.applyConstraints({ advanced: [{ zoom: val }] });
+      zoomed = on; $('zoomBtn').textContent = on ? 'Zoom 1x' : 'Zoom 2x';
+    } catch (e) { console.warn('zoom lỗi', e); $('zoomBtn').hidden = true; }
+  }
+
+  async function toggleTorch() {
+    if (!track) return;
+    try { torchOn = !torchOn; await track.applyConstraints({ advanced: [{ torch: torchOn }] }); }
+    catch (e) { torchOn = false; $('torchBtn').hidden = true; }
+  }
+
+  function stopCamera() {
+    running = false; clearInterval(timer); timer = null;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null; track = null; video.srcObject = null; torchOn = false;
+  }
+
+  // ---- Trả mã về ứng dụng ----
+  function onFound(text) {
+    running = false; clearInterval(timer);
+    guide.classList.add('hit');
+    if (navigator.vibrate) navigator.vibrate(60);
+    stopCamera();
+    setStatus('Đã đọc: ' + text, 'ok');
+
+    let sent = false;
+    const target = toApp();
+    if (target && APP_ORIGIN) {
+      try { target.postMessage({ type: 'mmtb-scan', code: text, rid: RID }, APP_ORIGIN); sent = true; }
+      catch (e) { console.warn('postMessage lỗi', e); }
+    }
+    $('doneCode').textContent = text;
+    $('doneMsg').textContent = sent
+      ? 'Đã gửi mã về ứng dụng. Trang này sẽ tự đóng; nếu không, bấm "Đóng trang này" để quay lại.'
+      : 'Không gửi được mã về ứng dụng (trang ứng dụng đã bị đóng hoặc không liên kết). Bấm "Sao chép mã", quay lại ứng dụng rồi dán vào tab Nhập tay.\n[chẩn đoán] opener: '
+        + (toApp() ? 'có' : 'KHÔNG') + ' · o=: ' + (APP_ORIGIN ? 'có' : 'KHÔNG') + ' · rid=: ' + (RID ? 'có' : 'KHÔNG');
+    // Gửi được thì đóng tab ngay, không hiện màn hình kết quả. Màn hình đó chỉ hiện khi không gửi được
+    // (để sao chép mã) hoặc khi trình duyệt không cho tự đóng tab.
+    if (sent) { try { window.close(); } catch (_) {} setTimeout(() => $('done').classList.add('show'), 300); }
+    else $('done').classList.add('show');
+  }
+
+  $('startBtn').onclick = startCamera;
+  // Tab do app mở bằng cú bấm của người dùng → tự bật camera luôn; bị từ chối thì startCamera hiện lại nút "Bật camera".
+  // Điều kiện dùng ?o= (app luôn truyền) thay vì window.opener, vì tab mở từ khung Apps Script có thể mất opener.
+  // Ẩn màn hình "Bật camera" ngay; startCamera tự hiện lại nếu bị từ chối.
+  if (APP_ORIGIN || window.opener) { $('start').style.display = 'none'; startCamera(); }
+  $('cancelBtn').onclick = $('stopBtn').onclick = $('closeBtn').onclick = () => {
+    stopCamera();
+    try { window.close(); } catch (_) {}
+    setStatus('Có thể đóng tab này.');
+  };
+  $('againBtn').onclick = () => { $('done').classList.remove('show'); startCamera(); };
+  $('copyBtn').onclick = async () => {
+    const t = $('doneCode').textContent;
+    try { await navigator.clipboard.writeText(t); $('copyBtn').textContent = 'Đã sao chép'; }
+    catch (_) {
+      const r = document.createRange(); r.selectNodeContents($('doneCode'));
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      $('copyBtn').textContent = 'Giữ vào mã để sao chép';
+    }
+  };
+  // ---- Chụp ảnh tem: dùng camera gốc của máy (ảnh nét hơn video), đọc ảnh vừa chụp ----
+  const openPhoto = () => {
+    if (stream) { stopCamera(); $('start').style.display = 'flex'; }
+    $('photoInput').value = '';
+    $('photoInput').click();
+  };
+  $('photoBtn').onclick = $('photoBtn2').onclick = openPhoto;
+  $('photoInput').onchange = async () => {
+    const f = $('photoInput').files && $('photoInput').files[0];
+    if (!f) return;
+    setStatus('Đang đọc ảnh...');
+    const url = URL.createObjectURL(f);
+    try {
+      const im = new Image();
+      await new Promise((ok, bad) => { im.onload = ok; im.onerror = () => bad(new Error('Không mở được ảnh')); im.src = url; });
+      if (JS) loadZxing();
+      let hit = null;
+      // Thử ảnh thu nhỏ trước (nhanh), không ra thì thử độ phân giải lớn hơn.
+      for (const maxSide of [1600, 2600]) {
+        const k = Math.min(1, maxSide / Math.max(im.naturalWidth, im.naturalHeight));
+        const w = Math.round(im.naturalWidth * k), h = Math.round(im.naturalHeight * k);
+        cv.width = w; cv.height = h;
+        cx.drawImage(im, 0, 0, w, h);
+        await new Promise(r => setTimeout(r, 0));
+        hit = await decodeImage(cx.getImageData(0, 0, w, h), 60, true, true);
+        if (hit || k === 1) break;
+      }
+      const text = hit && cleanCode(hit.text);
+      if (text) onFound(text);
+      else setStatus('Không đọc được vạch trong ảnh. Chụp lại: vạch nằm ngang, rõ nét, chiếm khoảng nửa bề ngang ảnh.', 'err');
+    } catch (e) { setStatus(e.message || String(e), 'err'); }
+    finally { URL.revokeObjectURL(url); }
+  };
+
+  $('torchBtn').onclick = toggleTorch;
+  $('zoomBtn').onclick = () => setZoom(!zoomed);
+  document.addEventListener('visibilitychange', () => { if (document.hidden && stream) { stopCamera(); setStatus('Camera đã tắt. Bấm "Bật camera" để quét tiếp.'); $('start').style.display = 'flex'; } });
+})();
+</script>
+</body>
+</html>

@@ -349,6 +349,8 @@
       if (sent) {
         $('doneMsg').textContent = 'Đã gửi mã về ứng dụng. Hãy quay lại ứng dụng (bấm "Đóng trang này" hoặc nút quay lại), mã sẽ tự hiện sau vài giây.';
         try { window.close(); } catch (_) {}
+        // Trình duyệt trong Zalo không cho tự đóng tab → quay lại trang trước (app) sau khi mã đã lên máy chủ
+        setTimeout(() => { if (history.length > 1) history.back(); }, 600);
         return;
       }
     }
@@ -371,6 +373,7 @@
     stopCamera();
     try { window.close(); } catch (_) {}
     setStatus('Đã hoàn thành. Quay lại ứng dụng.');
+    setTimeout(() => { if (history.length > 1) history.back(); }, 300);
   };
   $('againBtn').onclick = () => { $('done').classList.remove('show'); startCamera(); };
   $('copyBtn').onclick = async () => {

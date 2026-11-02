@@ -58,7 +58,6 @@
       <h2 style="margin:0">Quét tem MMTB</h2>
       <p>Bấm nút bên dưới để bật camera, rồi đưa vạch trên tem vào khung. Giữ máy cách tem khoảng 15–25 cm.</p>
       <button class="primary" id="startBtn">Bật camera</button>
-      <button id="photoBtn">Chụp ảnh tem</button>
       <button id="cancelBtn">Hủy</button>
     </div>
 
@@ -76,13 +75,11 @@
     <div class="row">
       <button id="torchBtn" hidden>Đèn flash</button>
       <button id="zoomBtn" hidden>Zoom 2x</button>
-      <button id="photoBtn2">Chụp ảnh</button>
-      <button id="stopBtn">Đóng</button>
+      <button id="stopBtn" class="primary">Hoàn thành</button>
     </div>
   </div>
 </div>
 
-<input type="file" id="photoInput" accept="image/*" capture="environment" hidden>
 <script src="code128.js"></script>
 <script>
 (() => {
@@ -269,21 +266,22 @@
   // ---- Trả mã về ứng dụng ----
   // Quét liên tục: cùng một mã còn trong khung thì không gửi lại; vắng mặt quá 4 giây mới tính là quét lần nữa
   const results = {};   // kết quả app trả về theo mã, để báo lại khi quét trùng
-  let added = 0, bannerTimer = null;
-  function showBanner(cls, big, small, ms) {
+  let added = 0, bannerTimer = null, lastBuzz = 0;
+  function showBanner(cls, big, small, ms, quiet) {
     const b = $('banner');
     b.className = cls; b.textContent = '';
     const t = document.createElement('b'); t.textContent = big; b.appendChild(t);
     if (small) { const s = document.createElement('span'); s.textContent = small; b.appendChild(s); }
     b.style.display = 'block';
     clearTimeout(bannerTimer); bannerTimer = setTimeout(() => { b.style.display = 'none'; }, ms || 1800);
-    // Rung: 1 lần = thêm mới, 2 lần = trùng hoặc lỗi
-    if (navigator.vibrate) navigator.vibrate(cls === 'ok' ? 80 : [80, 60, 80]);
+    // Rung: 1 lần = thêm mới, 2 lần = trùng hoặc lỗi. Cách nhau ít nhất 1,2 giây để không rung liên tục khi tem còn trong khung
+    const nowB = Date.now();
+    if (!quiet && cls !== 'wait' && nowB - lastBuzz > 1200 && navigator.vibrate) { lastBuzz = nowB; navigator.vibrate(cls === 'ok' ? 80 : [80, 60, 80]); }
   }
-  function showResult(text, r) {
-    if (r.ok) showBanner('ok', '✓ Đã thêm', text + (r.msg ? ' · ' + r.msg : ''));
-    else if (r.dup) showBanner('dup', 'Máy này đã quét rồi', text);
-    else showBanner('err', '✗ Không thêm được', text + ' · ' + r.msg, 3000);
+  function showResult(text, r, quiet) {
+    if (r.ok) showBanner('ok', '✓ Đã thêm', text + (r.msg ? ' · ' + r.msg : ''), 0, quiet);
+    else if (r.dup) showBanner('dup', 'Máy này đã quét rồi', text, 0, quiet);
+    else showBanner('err', '✗ Không thêm được', text + ' · ' + r.msg, 3000, quiet);
     setStatus('Đã thêm ' + added + ' máy', 'ok');
   }
   function onFoundCont(text) {
@@ -291,8 +289,9 @@
     sentAt[text] = now;
     if (seen && now - seen < 4000) {
       // Mã vẫn trong khung / vừa quét: không gửi lại, nhưng báo ngay thay vì im lặng
+      // Chỉ rung khi vừa đưa mã vào lại khung (vắng hơn 1 giây); mã cứ nằm trong khung thì chỉ giữ khung báo
       const r = results[text];
-      if (r) showResult(text, r.ok ? { dup: true } : r);
+      if (r) showResult(text, r.ok ? { dup: true } : r, now - seen < 1000);
       return;
     }
     guide.classList.add('hit'); setTimeout(() => guide.classList.remove('hit'), 600);
@@ -344,7 +343,7 @@
   $('cancelBtn').onclick = $('stopBtn').onclick = $('closeBtn').onclick = () => {
     stopCamera();
     try { window.close(); } catch (_) {}
-    setStatus('Có thể đóng tab này.');
+    setStatus('Đã hoàn thành. Quay lại ứng dụng.');
   };
   $('againBtn').onclick = () => { $('done').classList.remove('show'); startCamera(); };
   $('copyBtn').onclick = async () => {
@@ -356,40 +355,6 @@
       $('copyBtn').textContent = 'Giữ vào mã để sao chép';
     }
   };
-  // ---- Chụp ảnh tem: dùng camera gốc của máy (ảnh nét hơn video), đọc ảnh vừa chụp ----
-  const openPhoto = () => {
-    if (stream) { stopCamera(); $('start').style.display = 'flex'; }
-    $('photoInput').value = '';
-    $('photoInput').click();
-  };
-  $('photoBtn').onclick = $('photoBtn2').onclick = openPhoto;
-  $('photoInput').onchange = async () => {
-    const f = $('photoInput').files && $('photoInput').files[0];
-    if (!f) return;
-    setStatus('Đang đọc ảnh...');
-    const url = URL.createObjectURL(f);
-    try {
-      const im = new Image();
-      await new Promise((ok, bad) => { im.onload = ok; im.onerror = () => bad(new Error('Không mở được ảnh')); im.src = url; });
-      if (JS) loadZxing();
-      let hit = null;
-      // Thử ảnh thu nhỏ trước (nhanh), không ra thì thử độ phân giải lớn hơn.
-      for (const maxSide of [1600, 2600]) {
-        const k = Math.min(1, maxSide / Math.max(im.naturalWidth, im.naturalHeight));
-        const w = Math.round(im.naturalWidth * k), h = Math.round(im.naturalHeight * k);
-        cv.width = w; cv.height = h;
-        cx.drawImage(im, 0, 0, w, h);
-        await new Promise(r => setTimeout(r, 0));
-        hit = await decodeImage(cx.getImageData(0, 0, w, h), 60, true, true);
-        if (hit || k === 1) break;
-      }
-      const text = hit && cleanCode(hit.text);
-      if (text) onFound(text);
-      else setStatus('Không đọc được vạch trong ảnh. Chụp lại: vạch nằm ngang, rõ nét, chiếm khoảng nửa bề ngang ảnh.', 'err');
-    } catch (e) { setStatus(e.message || String(e), 'err'); }
-    finally { URL.revokeObjectURL(url); }
-  };
-
   $('torchBtn').onclick = toggleTorch;
   $('zoomBtn').onclick = () => setZoom(!zoomed);
   document.addEventListener('visibilitychange', () => { if (document.hidden && stream) { stopCamera(); setStatus('Camera đã tắt. Bấm "Bật camera" để quét tiếp.'); $('start').style.display = 'flex'; } });

@@ -91,6 +91,7 @@
   const qs = new URLSearchParams(location.search);
   const APP_ORIGIN = qs.get('o') || '';
   const RID = qs.get('rid') || '';
+  const RELAY_URL = qs.get('u') || '';   // URL web app Apps Script: đường dự phòng khi không có window.opener (Zalo...)
   const CONT = qs.get('c') === '1';   // quét liên tục: gửi mã về app nhưng giữ camera mở
   const sentAt = {};
   const TITLE = qs.get('t');
@@ -318,7 +319,15 @@
     else if (isStop(d.type)) { stopCamera(); try { window.close(); } catch (_) {} setStatus('Đã dừng. Có thể đóng tab này.'); }
   });
 
-  function onFound(text) {
+  // Đẩy mã lên Apps Script (app sẽ hỏi lại theo rid). Trả về true nếu đã gửi được yêu cầu.
+  async function relayToServer(text) {
+    if (!RELAY_URL || !RID || !/^https:\/\/script\.google(usercontent)?\.com\//.test(RELAY_URL)) return false;
+    const url = RELAY_URL + (RELAY_URL.includes('?') ? '&' : '?') + 'page=scanpush&rid=' + encodeURIComponent(RID) + '&code=' + encodeURIComponent(text);
+    try { await fetch(url, { mode: 'no-cors', cache: 'no-store' }); return true; }
+    catch (e) { console.warn('relay lỗi', e); return false; }
+  }
+
+  async function onFound(text) {
     if (CONT && toApp()) return onFoundCont(text);
     running = false; clearInterval(timer);
     guide.classList.add('hit');
@@ -333,6 +342,16 @@
       catch (e) { console.warn('postMessage lỗi', e); }
     }
     $('doneCode').textContent = text;
+    if (!sent) {
+      $('doneMsg').textContent = 'Đang gửi mã về ứng dụng...';
+      $('done').classList.add('show');
+      sent = await relayToServer(text);
+      if (sent) {
+        $('doneMsg').textContent = 'Đã gửi mã về ứng dụng. Hãy quay lại ứng dụng (bấm "Đóng trang này" hoặc nút quay lại), mã sẽ tự hiện sau vài giây.';
+        try { window.close(); } catch (_) {}
+        return;
+      }
+    }
     $('doneMsg').textContent = sent
       ? 'Đã gửi mã về ứng dụng. Trang này sẽ tự đóng; nếu không, bấm "Đóng trang này" để quay lại.'
       : 'Không gửi được mã về ứng dụng (trang ứng dụng đã bị đóng hoặc không liên kết). Bấm "Sao chép mã", quay lại ứng dụng rồi dán vào ô nhập tay.\n[chẩn đoán] opener: '

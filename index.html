@@ -87,6 +87,8 @@
   const qs = new URLSearchParams(location.search);
   const APP_ORIGIN = qs.get('o') || '';
   const RID = qs.get('rid') || '';
+  const CONT = qs.get('c') === '1';   // quét liên tục: gửi mã về app nhưng giữ camera mở
+  const sentAt = {};
 
   const SCAN_INTERVAL_MS = 150;
   const STRIP_RATIO = 0.45;          // chỉ đọc dải giữa khung hình
@@ -259,7 +261,26 @@
   }
 
   // ---- Trả mã về ứng dụng ----
+  // Quét liên tục: cùng một mã còn trong khung thì không gửi lại; vắng mặt quá 4 giây mới tính là quét lần nữa
+  function onFoundCont(text) {
+    const now = Date.now(), fresh = !(sentAt[text] && now - sentAt[text] < 4000);
+    sentAt[text] = now;
+    if (!fresh) return;
+    guide.classList.add('hit'); setTimeout(() => guide.classList.remove('hit'), 600);
+    if (navigator.vibrate) navigator.vibrate(60);
+    try { toApp().postMessage({ type: 'mmtb-scan', code: text, rid: RID }, APP_ORIGIN); setStatus('Đã gửi: ' + text, 'ok'); }
+    catch (e) { setStatus('Không gửi được mã về ứng dụng', 'err'); }
+  }
+  // App báo kết quả từng mã (ack) hoặc báo đã đóng hàng đợi (stop)
+  window.addEventListener('message', e => {
+    const d = e.data;
+    if (!d || d.rid !== RID || e.source !== toApp()) return;
+    if (d.type === 'mmtb-scan-ack') setStatus((d.ok ? '✓ ' : '✗ ') + d.msg, d.ok ? 'ok' : 'err');
+    else if (d.type === 'mmtb-scan-stop') { stopCamera(); try { window.close(); } catch (_) {} setStatus('Đã dừng. Có thể đóng tab này.'); }
+  });
+
   function onFound(text) {
+    if (CONT && toApp()) return onFoundCont(text);
     running = false; clearInterval(timer);
     guide.classList.add('hit');
     if (navigator.vibrate) navigator.vibrate(60);

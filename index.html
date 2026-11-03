@@ -92,7 +92,6 @@
   const APP_ORIGIN = qs.get('o') || '';
   const RID = qs.get('rid') || '';
   const CONT = qs.get('c') === '1';   // quét liên tục: gửi mã về app nhưng giữ camera mở
-  const RELAY = qs.get('u') || '';   // u=<url app Apps Script>: kênh dự phòng khi mất opener (webview Zalo/Facebook)
   const sentAt = {};
   const TITLE = qs.get('t');
   if (TITLE) { document.title = TITLE; $title(TITLE); }
@@ -117,28 +116,6 @@
 
   // Nhận mã về: cửa sổ mở trang này (tab mới) hoặc trang chứa iframe (modal trong app)
   const toApp = () => window.opener && !window.opener.closed ? window.opener : (window.parent !== window ? window.parent : null);
-
-  const relayOn = () => !toApp() && !!RELAY && !!RID;
-  const relayUrl = (op, extra) => RELAY + (RELAY.includes('?') ? '&' : '?') + 'page=relay&op=' + op + '&rid=' + encodeURIComponent(RID) + (extra || '');
-  async function relayPut(code) {
-    const j = await (await fetch(relayUrl('put', '&code=' + encodeURIComponent(code)))).json();
-    if (!j.ok) throw new Error(j.msg || 'relay lỗi');
-  }
-  // Hỏi server phản hồi từng mã (ack) / lệnh dừng của app, mỗi phản hồi có seq tăng dần
-  let relaySeq = 0, relayTimer = null, relayBusy = false;
-  function relayAckLoop() {
-    if (relayTimer) return;
-    relayTimer = setInterval(async () => {
-      if (relayBusy) return;
-      relayBusy = true;
-      try {
-        const j = await (await fetch(relayUrl('ack', '&since=' + relaySeq))).json();
-        (j.items || []).forEach(it => { relaySeq = Math.max(relaySeq, it.seq); onAppMsg(it); });
-      } catch (_) {}
-      relayBusy = false;
-    }, 1500);
-  }
-  const relayStop = () => { clearInterval(relayTimer); relayTimer = null; };
 
   const setStatus = (t, cls) => { statusEl.textContent = t; statusEl.className = cls || ''; };
 
@@ -326,28 +303,23 @@
       return;
     }
     guide.classList.add('hit'); setTimeout(() => guide.classList.remove('hit'), 600);
-    showBanner('wait', 'Đang kiểm tra...', text, 4000);
-    const fail = () => showBanner('err', 'Không gửi được mã về ứng dụng', text, 3000);
-    if (toApp()) { try { toApp().postMessage({ type: T.scan, code: text, rid: RID }, APP_ORIGIN); } catch (e) { fail(); } }
-    else relayPut(text).then(relayAckLoop, fail);
+    try { toApp().postMessage({ type: T.scan, code: text, rid: RID }, APP_ORIGIN); showBanner('wait', 'Đang kiểm tra...', text, 4000); }
+    catch (e) { showBanner('err', 'Không gửi được mã về ứng dụng', text, 3000); }
   }
   // App báo kết quả từng mã (ack) hoặc báo đã đóng hàng đợi (stop)
   window.addEventListener('message', e => {
     const d = e.data;
     if (!d || d.rid !== RID || e.source !== toApp()) return;
-    onAppMsg(d);
-  });
-  function onAppMsg(d) {
     if (isAck(d.type)) {
       results[d.code] = { ok: !!d.ok, dup: !!d.dup, msg: d.msg || '' };
       if (d.ok) added++;
       showResult(d.code, results[d.code]);
     }
-    else if (isStop(d.type)) { relayStop(); stopCamera(); try { window.close(); } catch (_) {} setStatus('Đã dừng. Có thể đóng tab này.'); }
-  }
+    else if (isStop(d.type)) { stopCamera(); try { window.close(); } catch (_) {} setStatus('Đã dừng. Có thể đóng tab này.'); }
+  });
 
   function onFound(text) {
-    if (CONT && (toApp() || relayOn())) return onFoundCont(text);
+    if (CONT && toApp()) return onFoundCont(text);
     running = false; clearInterval(timer);
     guide.classList.add('hit');
     if (navigator.vibrate) navigator.vibrate(60);
@@ -361,19 +333,14 @@
       catch (e) { console.warn('postMessage lỗi', e); }
     }
     $('doneCode').textContent = text;
-    const finish = ok => {
-      $('doneMsg').textContent = ok
-        ? 'Đã gửi mã về ứng dụng. Trang này sẽ tự đóng; nếu không, bấm "Đóng trang này" (hoặc nút quay lại) để về ứng dụng.'
-        : 'Không gửi được mã về ứng dụng (trang ứng dụng đã bị đóng hoặc không liên kết). Bấm "Sao chép mã", quay lại ứng dụng rồi dán vào ô nhập tay.\n[chẩn đoán] opener: '
-          + (toApp() ? 'có' : 'KHÔNG') + ' · o=: ' + (APP_ORIGIN ? 'có' : 'KHÔNG') + ' · rid=: ' + (RID ? 'có' : 'KHÔNG') + ' · u=: ' + (RELAY ? 'có' : 'KHÔNG');
-      // Gửi được thì đóng tab ngay, không hiện màn hình kết quả. Màn hình đó chỉ hiện khi không gửi được
-      // (để sao chép mã) hoặc khi trình duyệt không cho tự đóng tab.
-      if (ok) { try { window.close(); } catch (_) {} setTimeout(() => $('done').classList.add('show'), 300); }
-      else $('done').classList.add('show');
-    };
-    // Không có opener (Zalo...) mà app có truyền u= → gửi qua server
-    if (!sent && relayOn()) relayPut(text).then(() => finish(true), () => finish(false));
-    else finish(sent);
+    $('doneMsg').textContent = sent
+      ? 'Đã gửi mã về ứng dụng. Trang này sẽ tự đóng; nếu không, bấm "Đóng trang này" để quay lại.'
+      : 'Không gửi được mã về ứng dụng (trang ứng dụng đã bị đóng hoặc không liên kết). Bấm "Sao chép mã", quay lại ứng dụng rồi dán vào ô nhập tay.\n[chẩn đoán] opener: '
+        + (toApp() ? 'có' : 'KHÔNG') + ' · o=: ' + (APP_ORIGIN ? 'có' : 'KHÔNG') + ' · rid=: ' + (RID ? 'có' : 'KHÔNG');
+    // Gửi được thì đóng tab ngay, không hiện màn hình kết quả. Màn hình đó chỉ hiện khi không gửi được
+    // (để sao chép mã) hoặc khi trình duyệt không cho tự đóng tab.
+    if (sent) { try { window.close(); } catch (_) {} setTimeout(() => $('done').classList.add('show'), 300); }
+    else $('done').classList.add('show');
   }
 
   $('startBtn').onclick = startCamera;
@@ -382,7 +349,7 @@
   // Ẩn màn hình "Bật camera" ngay; startCamera tự hiện lại nếu bị từ chối.
   if (APP_ORIGIN || window.opener) { $('start').style.display = 'none'; startCamera(); }
   $('cancelBtn').onclick = $('stopBtn').onclick = $('closeBtn').onclick = () => {
-    relayStop(); stopCamera();
+    stopCamera();
     try { window.close(); } catch (_) {}
     setStatus('Đã hoàn thành. Quay lại ứng dụng.');
   };
